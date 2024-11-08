@@ -50,9 +50,10 @@ class VideoFormat(Enum):
                 VideoEncoder.H265,
                 VideoEncoder.VP9,
                 VideoEncoder.FFV1,
+                VideoEncoder.AV1,
             )
         elif self == VideoFormat.MP4:
-            return VideoEncoder.H264, VideoEncoder.H265, VideoEncoder.VP9
+            return VideoEncoder.H264, VideoEncoder.H265, VideoEncoder.VP9, VideoEncoder.AV1
         elif self == VideoFormat.MOV:
             return VideoEncoder.H264, VideoEncoder.H265
         elif self == VideoFormat.WEBM:
@@ -70,6 +71,7 @@ class VideoEncoder(Enum):
     H265 = "libx265"
     VP9 = "libvpx-vp9"
     FFV1 = "ffv1"
+    AV1 = "libsvtav1"
 
     @property
     def formats(self) -> tuple[VideoFormat, ...]:
@@ -80,7 +82,7 @@ class VideoEncoder(Enum):
         return tuple(formats)
 
 
-class VideoPreset(Enum):
+class VideoPresetH26x(Enum):
     ULTRA_FAST = "ultrafast"
     SUPER_FAST = "superfast"
     VERY_FAST = "veryfast"
@@ -89,6 +91,17 @@ class VideoPreset(Enum):
     SLOW = "slow"
     SLOWER = "slower"
     VERY_SLOW = "veryslow"
+
+
+class VideoPresetAV1(Enum):
+    ULTRA_SLOW = 1
+    VERY_SLOW = 2
+    SLOW = 3
+    SLOWER_NORMAL = 4
+    NORMAL = 5
+    FASTER_NORMAL = 6
+    FAST = 7
+    VERY_FAST = 8
 
 
 class AudioSettings(Enum):
@@ -111,7 +124,7 @@ class SimpleVideoFormat(Enum):
 
 def get_simple_format(
     simple_video_format: SimpleVideoFormat, quality: int
-) -> tuple[VideoFormat, VideoEncoder, VideoPreset, int]:
+) -> tuple[VideoFormat, VideoEncoder, VideoPresetH26x, int]:
     container = {
         SimpleVideoFormat.MP4_H264: VideoFormat.MP4,
         SimpleVideoFormat.MP4_H265: VideoFormat.MP4,
@@ -130,20 +143,20 @@ def get_simple_format(
     crf = int((100 - quality) / 100 * 51)
 
     if quality > 95:
-        video_preset = VideoPreset.VERY_SLOW
+        video_preset_h26x = VideoPresetH26x.VERY_SLOW
     elif quality > 80:
-        video_preset = VideoPreset.SLOWER
+        video_preset_h26x = VideoPresetH26x.SLOWER
     elif quality > 60:
-        video_preset = VideoPreset.SLOW
+        video_preset_h26x = VideoPresetH26x.SLOW
     elif quality >= 50:
-        video_preset = VideoPreset.MEDIUM
+        video_preset_h26x = VideoPresetH26x.MEDIUM
     elif quality > 35:
-        video_preset = VideoPreset.FAST
+        video_preset_h26x = VideoPresetH26x.FAST
     elif quality > 20:
-        video_preset = VideoPreset.VERY_FAST
+        video_preset_h26x = VideoPresetH26x.VERY_FAST
     else:
-        video_preset = VideoPreset.ULTRA_FAST
-    return container, encoder, video_preset, crf
+        video_preset_h26x = VideoPresetH26x.ULTRA_FAST
+    return container, encoder, video_preset_h26x, crf
 
 
 PARAMETERS: dict[VideoEncoder, list[Literal["preset", "crf"]]] = {
@@ -151,6 +164,7 @@ PARAMETERS: dict[VideoEncoder, list[Literal["preset", "crf"]]] = {
     VideoEncoder.H265: ["preset", "crf"],
     VideoEncoder.VP9: ["crf"],
     VideoEncoder.FFV1: [],
+    VideoEncoder.AV1: ["preset", "crf"],
 }
 
 
@@ -299,29 +313,43 @@ class Writer:
                     VideoEncoder.H265: "H.265 (HEVC)",
                     VideoEncoder.VP9: "VP9",
                     VideoEncoder.FFV1: "FFV1",
+                    VideoEncoder.AV1: "AV1",
                 },
                 conditions={
                     VideoEncoder.H264: Condition.enum(4, VideoEncoder.H264.formats),
                     VideoEncoder.H265: Condition.enum(4, VideoEncoder.H265.formats),
                     VideoEncoder.VP9: Condition.enum(4, VideoEncoder.VP9.formats),
                     VideoEncoder.FFV1: Condition.enum(4, VideoEncoder.FFV1.formats),
+                    VideoEncoder.AV1: Condition.enum(4, VideoEncoder.AV1.formats),
                 },
             )
             .with_id(3)
             .wrap_with_conditional_group(),
             if_enum_group(3, (VideoEncoder.H264, VideoEncoder.H265))(
                 EnumInput(
-                    VideoPreset,
+                    VideoPresetH26x,
                     label="Preset",
                     label_style="inline",
-                    default=VideoPreset.MEDIUM,
+                    default=VideoPresetH26x.MEDIUM,
                 )
                 .with_docs(
                     "For more information on presets, see [here](https://trac.ffmpeg.org/wiki/Encode/H.264#Preset)."
                 )
                 .with_id(8),
             ),
-            if_enum_group(3, (VideoEncoder.H264, VideoEncoder.H265, VideoEncoder.VP9))(
+            if_enum_group(3, (VideoEncoder.AV1))(
+                EnumInput(
+                    VideoPresetAV1,
+                    label="Preset",
+                    label_style="inline",
+                    default=VideoPresetAV1.NORMAL,
+                )
+                .with_docs(
+                    "For more information on presets, see [here](https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/CommonQuestions.md#what-presets-do)."
+                )
+                .with_id(19),
+            ),
+            if_enum_group(3, (VideoEncoder.H264, VideoEncoder.H265, VideoEncoder.VP9, VideoEncoder.AV1))(
                 SliderInput(
                     "CRF",
                     min=0,
@@ -400,7 +428,8 @@ def save_video_node(
     simplicity: Simplicity,
     container: VideoFormat,
     encoder: VideoEncoder,
-    video_preset: VideoPreset,
+    video_preset_h26x: VideoPresetH26x,
+    video_preset_av1: VideoPresetAV1,
     crf: int,
     additional_parameters: str | None,
     simple_video_format: SimpleVideoFormat,
@@ -410,7 +439,7 @@ def save_video_node(
     audio_settings: AudioSettings,
 ) -> Collector[np.ndarray, None]:
     if simplicity == Simplicity.SIMPLE:
-        container, encoder, video_preset, crf = get_simple_format(
+        container, encoder, video_preset_h26x, crf = get_simple_format(
             simple_video_format, quality
         )
 
@@ -426,12 +455,17 @@ def save_video_node(
     }
 
     # Append parameters
+    logger.warning("test")
     if encoder in container.encoders:
         output_params["vcodec"] = encoder.value
 
         parameters = PARAMETERS[encoder]
         if "preset" in parameters:
-            output_params["preset"] = video_preset.value
+            if encoder.value == "libsvtav1":
+                output_params["preset"] = video_preset_av1.value
+                logger.warning(output_params["preset"])
+            else:
+                output_params["preset"] = video_preset_h26x.value
         if "crf" in parameters:
             output_params["crf"] = crf
 
